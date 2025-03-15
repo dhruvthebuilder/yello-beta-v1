@@ -20,8 +20,11 @@ OPENAI_API_KEY = st.secrets["openai"]["api_key"]
 SERPAPI_API_KEY = st.secrets["serpapi"]["api_key"]
 openai.api_key = OPENAI_API_KEY
 
-# Firebase service account credentials from secrets (stored as a table/dictionary)
-FIREBASE_CREDENTIALS = st.secrets["firebase"]
+firebase_creds = st.secrets["firebase"]
+if isinstance(firebase_creds, str):
+    firebase_creds = json.loads(firebase_creds)
+cred = credentials.Certificate(firebase_creds)
+firebase_admin.initialize_app(cred)
 
 if not firebase_admin._apps:
     cred = credentials.Certificate(FIREBASE_CREDENTIALS)
