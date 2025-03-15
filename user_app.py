@@ -20,15 +20,16 @@ OPENAI_API_KEY = st.secrets["openai"]["api_key"]
 SERPAPI_API_KEY = st.secrets["serpapi"]["api_key"]
 openai.api_key = OPENAI_API_KEY
 
+# Load Firebase credentials from secrets
 firebase_creds = st.secrets["firebase"]
 if isinstance(firebase_creds, str):
     firebase_creds = json.loads(firebase_creds)
-cred = credentials.Certificate(firebase_creds)
-firebase_admin.initialize_app(cred)
 
+# Initialize Firebase if not already initialized
 if not firebase_admin._apps:
-    cred = credentials.Certificate(FIREBASE_CREDENTIALS)
+    cred = credentials.Certificate(firebase_creds)
     firebase_admin.initialize_app(cred)
+
 db = firestore.client()
 
 st.set_page_config(page_title="AI Learning Plan Generator", layout="wide")
