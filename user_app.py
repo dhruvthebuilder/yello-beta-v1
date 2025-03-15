@@ -11,33 +11,36 @@ from typing import Dict, Any, List
 # -----------------------
 # 1. CONFIGURATION & INITIAL SETUP
 # -----------------------
+st.set_page_config(page_title="AI Learning Plan Generator", layout="wide")
 
 def rerun():
     st.rerun()
 
-# Replace with your own keys
+# Load API keys from Streamlit secrets
 OPENAI_API_KEY = st.secrets["openai"]["api_key"]
-SERPAPI_API_KEY = st.secrets["serpapi"]["api_key"]
 openai.api_key = OPENAI_API_KEY
+SERPAPI_API_KEY = st.secrets["serpapi"]["api_key"]
 
-# Load Firebase credentials from secrets
-firebase_creds = st.secrets["firebase"]
-if isinstance(firebase_creds, str):
-    firebase_creds = json.loads(firebase_creds)
+# Load Firebase credentials from a local JSON file
+firebase_creds_str = st.secrets["firebase"]["credentials_json"]
 
-# Initialize Firebase if not already initialized
-if not firebase_admin._apps:
+# Parse the JSON string into a dictionary
+try:
+    firebase_creds = json.loads(firebase_creds_str)
+except json.JSONDecodeError as e:
+    st.error("Error decoding Firebase credentials: " + str(e))
+    firebase_creds = {}
+
+# Initialize Firebase if credentials parsed successfully and not already initialized
+if firebase_creds and not firebase_admin._apps:
     cred = credentials.Certificate(firebase_creds)
     firebase_admin.initialize_app(cred)
 
 db = firestore.client()
 
-st.set_page_config(page_title="AI Learning Plan Generator", layout="wide")
-
 # -----------------------
 # 2. HELPER FUNCTIONS
 # -----------------------
-
 def extract_json(text: str) -> str:
     """Extract a JSON object from text using regex."""
     try:
@@ -47,6 +50,20 @@ def extract_json(text: str) -> str:
     except Exception as e:
         st.error(f"Error extracting JSON: {e}")
     return ""
+
+def clean_gpt_response(response_text: str) -> str:
+    """Remove markdown code fences from GPT response."""
+    # Check if response starts with triple backticks
+    if response_text.startswith("```"):
+        lines = response_text.splitlines()
+        # Remove the first line if it starts with ``` (with optional language tag)
+        if lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        # Remove the last line if it contains only closing triple backticks
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        response_text = "\n".join(lines)
+    return response_text
 
 def link_is_valid(url: str) -> bool:
     """
@@ -102,12 +119,6 @@ def serpapi_search(query: str, num_results: int = 3) -> List[Dict[str, str]]:
 # 3. THEME CSS (STRICT BLACK & WHITE)
 # -----------------------
 def get_theme_css() -> str:
-    """
-    Returns CSS using only black (#000000) and white (#FFFFFF).
-    - Background: White
-    - Text: Black
-    - Buttons: Black background, white text.
-    """
     return """
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
     <style>
@@ -143,7 +154,7 @@ def get_theme_css() -> str:
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         }
         h1, h2, h3, h4, h5 {
-            color: #fffff;
+            color: #ffffff;
         }
         a, a:visited {
             color: #CBCBCB;
@@ -170,97 +181,75 @@ st.markdown(get_theme_css(), unsafe_allow_html=True)
 # -----------------------
 # 4. GPT LEARNING PLAN GENERATION
 # -----------------------
-def generate_learning_plan(goal: str, timeline: str, learning_style: list,
+def generate_learning_plan(goal: str, timeline: str, learning_style: List[str],
                            background_level: str, weekly_time: int,
                            topics: str, primary_objective: str, future_goals: str,
                            challenges: str, additional_info: str) -> Dict[str, Any]:
-    """
-    Generate a tailored learning plan using GPT.
-    The prompt includes extra questions for a more personalized plan.
-    Validates resource links and falls back to SerpAPI if needed.
-    """
     prompt = f"""
 You are an expert learning coach. A user wants to learn about {goal}.
-The user is interested in the following topics: {topics}.
+They are interested in the following topics: {topics}.
 Their primary objective is: {primary_objective}.
 They aim to achieve: {future_goals}.
-They mention the following challenges: {challenges}.
+They mention these challenges: {challenges}.
 Additional information: {additional_info}.
-They are at a {background_level} level and prefer these learning styles: {', '.join(learning_style)}.
-They can dedicate about {weekly_time} hours per week and their timeline is {timeline}.
+The user's current expertise level is {background_level} and they prefer these learning methods: {', '.join(learning_style)}.
+They can dedicate {weekly_time} hours per week and want to follow a timeline of {timeline}.
 
-Provide a structured weekly learning plan where each week includes:
-- A clear objective.
-- 2-3 suggested resources with direct links and resource types (video, article, podcast, project).
-  * If "Podcasts" is in the user's learning style, include at least one resource of type "podcast".
-  * If "Hands-on Projects" is in the user's learning style, include a detailed hands-on project description as a resource of type "project".
-- 2-3 action items with short due-by estimates.
-
-Return your answer strictly in JSON format with the structure:
+Please generate a structured weekly learning plan in valid JSON format without any extra text. Follow this schema exactly:
 {{
-    "goal": "...",
-    "timeline": "...",
-    "learning_style": [...],
-    "background_level": "...",
-    "weekly_time": ...,
+    "goal": string,
+    "timeline": string,
+    "learning_style": [string],
+    "background_level": string,
+    "weekly_time": number,
     "weeks": [
         {{
-            "week_number": 1,
-            "objective": "...",
+            "week_number": number,
+            "objective": string,
             "resources": [
                 {{
-                    "name": "...",
-                    "link": "...",
-                    "type": "..."
+                    "name": string,
+                    "link": string,
+                    "type": string
                 }}
             ],
             "action_items": [
                 {{
-                    "description": "...",
-                    "due_by": "..."
+                    "description": string,
+                    "due_by": string
                 }}
             ]
         }}
     ]
 }}
+Do not include any additional explanation or formatting.
     """
-    response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": prompt}
-        ],
-        max_tokens=1400,
-        temperature=0.7,
-    )
-    plan_text = response["choices"][0]["message"]["content"]
     try:
-        plan_dict = json.loads(plan_text)
-    except Exception:
-        extracted = extract_json(plan_text)
-        if not extracted:
-            return {}
+        response = openai.ChatCompletion.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=1400,
+            temperature=0.2
+        )
+        plan_text = response["choices"][0]["message"]["content"]
+        plan_text = clean_gpt_response(plan_text)
         try:
-            plan_dict = json.loads(extracted)
+            plan_dict = json.loads(plan_text)
         except Exception:
-            return {}
+            extracted = extract_json(plan_text)
+            if not extracted:
+                st.error("Failed to extract JSON from GPT response.")
+                st.write("Raw GPT Response:", plan_text)
+                return {}
+            plan_dict = json.loads(extracted)
+    except Exception as e:
+        st.error("Error calling OpenAI API: " + str(e))
+        return {}
 
-    plan_dict.setdefault("goal", goal)
-    plan_dict.setdefault("timeline", timeline)
-    plan_dict.setdefault("learning_style", learning_style)
-    plan_dict.setdefault("background_level", background_level)
-    plan_dict.setdefault("weekly_time", weekly_time)
-
-    # Validate resource links
-    for week in plan_dict.get("weeks", []):
-        valid_resources = []
-        for r in week.get("resources", []):
-            link_url = r.get("link", "")
-            if link_url and link_is_valid(link_url):
-                valid_resources.append(r)
-        week["resources"] = valid_resources
-
-    # Fallback: for each week, if a desired resource type is missing, use SerpAPI
+    # Fallback: For each week, if a desired resource type is missing, use SerpAPI.
     resource_mapping = {
         "Videos": "video",
         "Articles": "article",
@@ -296,9 +285,6 @@ if "loading" not in st.session_state:
 # 6. AUTHENTICATION FUNCTIONS
 # -----------------------
 def sign_up(email: str, password: str):
-    """
-    Create a user in Firebase Auth and write user details to Firestore.
-    """
     try:
         user = auth.create_user(email=email, password=password)
         db.collection("users").document(user.uid).set({
@@ -313,9 +299,6 @@ def sign_up(email: str, password: str):
         return None
 
 def log_in(email: str, password: str):
-    """
-    Log in an existing user and set session state.
-    """
     try:
         user_rec = auth.get_user_by_email(email)
         if user_rec:
@@ -390,7 +373,6 @@ if st.sidebar.button("Logout"):
 # -----------------------
 st.markdown("<h1><i class='material-icons icon'>dashboard</i> AI Learning Plan Generator</h1>", unsafe_allow_html=True)
 
-# If a plan is selected, display it.
 if st.session_state["selected_plan"]:
     plan = st.session_state["selected_plan"]
     st.subheader(f"Learning Plan: {plan.get('goal', 'No Title')}")
@@ -429,12 +411,10 @@ if st.session_state["selected_plan"]:
                 })
                 st.success("Thank you for reporting the issue!")
                 
-# If the user is creating a new plan, ask additional detailed questions.
 elif st.session_state["create_plan"]:
     st.markdown("<h2><i class='material-icons icon'>create</i> Create a New Learning Plan</h2>", unsafe_allow_html=True)
     st.markdown("<p class='small-muted'>Please answer the following questions to help us tailor your learning plan.</p>", unsafe_allow_html=True)
     
-    # Basic questions
     subject = st.text_input("1. What do you want to learn?", placeholder="e.g., Web Development")
     topics = st.text_input("2. What specific topics are you interested in?", placeholder="e.g., Front-end frameworks, APIs")
     primary_objective = st.text_input("3. What is your primary objective?", placeholder="e.g., Career advancement, Personal interest")
