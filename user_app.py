@@ -11,7 +11,7 @@ from typing import Dict, Any, List
 # -----------------------
 # 1. CONFIGURATION & INITIAL SETUP
 # -----------------------
-st.set_page_config(page_title="AI Learning Plan Generator", layout="wide")
+st.set_page_config(page_title="Yello - Personalised Learning Plan Generator", layout="wide")
 
 def rerun():
     st.rerun()
@@ -340,7 +340,7 @@ def report_issue(description: str):
 # 8. AUTHENTICATION UI
 # -----------------------
 if not st.session_state["user"]:
-    st.markdown("<h1><i class='material-icons icon'>school</i> AI Learning Plan Generator</h1>", unsafe_allow_html=True)
+    st.markdown("<h1><i class='material-icons icon'>school</i> Yello Personalised Learning Plan Generator</h1>", unsafe_allow_html=True)
     st.markdown("<p class='small-muted'>Sign up or log in to create and view your personalized learning plans.</p>", unsafe_allow_html=True)
     auth_option = st.radio("Choose an option:", ["Login", "Sign Up"])
     email = st.text_input("Email", key="auth_email")
@@ -407,7 +407,7 @@ if st.sidebar.button("Logout"):
 # -----------------------
 # 10. MAIN CONTENT AREA
 # -----------------------
-st.markdown("<h1><i class='material-icons icon'>dashboard</i> AI Learning Plan Generator</h1>", unsafe_allow_html=True)
+st.markdown("<h1><i class='material-icons icon'>dashboard</i> Yello Personalised Learning Plan Generator</h1>", unsafe_allow_html=True)
 
 if st.session_state["selected_plan"]:
     plan = st.session_state["selected_plan"]
@@ -450,13 +450,27 @@ if st.session_state["selected_plan"]:
             learning_plans_ref.document(plan_id).update({"rating": rating})
             st.success("Thank you for your feedback!")
     
-    st.markdown("<h4>Report an Issue</h4>", unsafe_allow_html=True)
-    issue_text = st.text_area("Describe any issue or feedback you have:")
-    if st.button("Submit Issue"):
-        if issue_text.strip():
-            report_issue(issue_text)
-        else:
-            st.error("Please provide details about the issue before submitting.")
+    plan_id = None
+    for doc in load_saved_plans():
+        data = doc.to_dict()
+        if data.get("title", "") == plan.get("goal", ""):
+            plan_id = doc.id
+            break
+    if plan_id is None:
+        st.error("Plan ID not found. Cannot report an issue.")
+    else:
+        st.markdown("### Report an Issue")
+        issue_key = f"issue_{plan_id}"
+        issue_text = st.text_area("Describe any issue or feedback you have:", key=issue_key, value="")
+        if st.button("Submit Issue", key=f"submit_issue_{plan_id}"):
+            if issue_text.strip():
+                report_issue(issue_text)  # Updated: pass only the issue description
+                st.success("Issue reported. To submit a new issue, please clear the previous input and enter new one.")
+                if issue_key in st.session_state:
+                    st.session_state.pop(issue_key)
+                rerun()
+            else:
+                st.error("Please provide details about the issue before submitting.")
             
 elif st.session_state["create_plan"]:
     st.markdown("<h2><i class='material-icons icon'>create</i> Create a New Learning Plan</h2>", unsafe_allow_html=True)
