@@ -524,13 +524,21 @@ def display_week_with_progress(week: Dict[str, Any], week_index: int, weekly_tim
     along with a checkbox. The entire week is shown within a styled black box that also mentions
     the estimated time required to complete that week. If a resource of type "video" and a name containing
     "Best Video for" is found, that video is embedded.
-    """
-    # Unique key for storing checkbox states
-    week_key = f"week_{week_index}_progress"
-    if week_key not in st.session_state:
-        st.session_state[week_key] = {}
     
-    # Begin the styled black box using custom CSS class "week-box"
+    The progress for this week is loaded from and saved to Firestore so that the user's checkmarks persist.
+    """
+    week_key = f"week_{week_index}_progress"
+    plan_id = st.session_state["selected_plan_id"]
+    
+    # Load persisted progress from Firestore (if any)
+    plan_doc = learning_plans_ref.document(plan_id).get().to_dict()
+    if plan_doc and "progress" in plan_doc and week_key in plan_doc["progress"]:
+        st.session_state[week_key] = plan_doc["progress"][week_key]
+    else:
+        if week_key not in st.session_state:
+            st.session_state[week_key] = {}
+    
+    # Begin the styled black box
     st.markdown("<div class='week-box'>", unsafe_allow_html=True)
     st.markdown(f"### Week {week.get('week_number', '?')}: {week.get('objective', 'No Objective')}")
     st.markdown(f"**Estimated Time: {weekly_time} hrs**")
@@ -589,10 +597,16 @@ def display_week_with_progress(week: Dict[str, Any], week_index: int, weekly_tim
     for resource in week.get("resources", []):
         if resource.get("type", "").lower() == "video" and "Best Video for" in resource.get("name", ""):
             st.video(resource.get("link"))
-            break  # Embed only one video per week
+            break
     
-    # Close the black box
     st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Update Firestore with the new progress for this week
+    plan_ref = learning_plans_ref.document(plan_id)
+    current_doc = plan_ref.get().to_dict()
+    progress = current_doc.get("progress", {})
+    progress[week_key] = st.session_state[week_key]
+    plan_ref.update({"progress": progress})
 
 # -----------------------
 # 12. MAIN CONTENT AREA (Plan Viewer / Creator)
@@ -614,7 +628,7 @@ if st.session_state["selected_plan"]:
     st.markdown(f"<p class='small-muted'><strong>Background Level:</strong> {plan.get('background_level', 'N/A')}</p>", unsafe_allow_html=True)
     st.markdown(f"<p class='small-muted'><strong>Weekly Time Available:</strong> {plan.get('weekly_time', 'N/A')} hrs</p>", unsafe_allow_html=True)
     
-    # Display each week with the custom styled box. Use the plan's weekly_time for each week.
+    # Display each week using the custom styled box.
     weekly_time = plan.get("weekly_time", 0)
     for idx, week in enumerate(plan.get("weeks", [])):
         display_week_with_progress(week, idx, weekly_time)
@@ -704,7 +718,8 @@ elif st.session_state["create_plan"]:
                     new_plan_ref.set({
                         "title": plan_data["goal"],
                         "plan": json.dumps(plan_data),
-                        "rating": None
+                        "rating": None,
+                        "progress": {}  # Initialize progress field
                     })
                     st.success("Learning plan generated and saved!")
                     rerun()
