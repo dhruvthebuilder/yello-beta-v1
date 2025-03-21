@@ -21,21 +21,22 @@ OPENAI_API_KEY = st.secrets["openai"]["api_key"]
 openai.api_key = OPENAI_API_KEY
 SERPAPI_API_KEY = st.secrets["serpapi"]["api_key"]
 
-# Load Firebase service account credentials from secrets
+# -----------------------
+# 2. FIREBASE INITIALIZATION
+# -----------------------
 firebase_creds_str = st.secrets["firebase"]["credentials_json"]
 if isinstance(firebase_creds_str, str):
     firebase_creds = json.loads(firebase_creds_str)
 else:
     firebase_creds = firebase_creds_str
 
-# Initialize Firebase Admin if not already initialized
 if firebase_creds and not firebase_admin._apps:
     cred = credentials.Certificate(firebase_creds)
     firebase_admin.initialize_app(cred)
 
 db = firestore.client()
 
-# Load Firebase Web configuration (for client-side usage if needed)
+# Load Firebase Web configuration (if needed)
 firebase_web_config_str = st.secrets["firebase_web"]["credentials_json"]
 if isinstance(firebase_web_config_str, str):
     firebase_web_config = json.loads(firebase_web_config_str)
@@ -43,7 +44,7 @@ else:
     firebase_web_config = firebase_web_config_str
 
 # -----------------------
-# 2. HELPER FUNCTIONS
+# 3. HELPER FUNCTIONS
 # -----------------------
 def extract_json(text: str) -> str:
     try:
@@ -107,7 +108,91 @@ def serpapi_search(query: str, num_results: int = 3) -> List[Dict[str, str]]:
         return []
 
 # -----------------------
-# 3. THEME CSS (STRICT BLACK & WHITE)
+# NEW: RETRIEVAL FOR AUGMENTATION (RAG)
+# -----------------------
+def retrieve_context_for_goal(goal: str) -> str:
+    """
+    Retrieve additional context relevant to the goal.
+    For simplicity, we search for an "overview of <goal>" using SerpAPI.
+    """
+    results = serpapi_search(f"overview of {goal}", num_results=1)
+    if results:
+        return results[0].get("name", "")
+    return ""
+
+# -----------------------
+# NEW: YOUTUBE VIDEO RETRIEVAL & SCORING FUNCTIONS
+# -----------------------
+def get_youtube_videos(query: str, max_results: int = 10) -> List[Dict[str, str]]:
+    """Retrieve videos from YouTube Data API using the week's objective as query."""
+    youtube_api_key = st.secrets["youtube"]["api_key"]
+    url = "https://www.googleapis.com/youtube/v3/search"
+    params = {
+        "part": "snippet",
+        "q": query,
+        "type": "video",
+        "maxResults": max_results,
+        "key": youtube_api_key
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        data = resp.json()
+        videos = []
+        for item in data.get("items", []):
+            title = item["snippet"]["title"]
+            video_id = item["id"]["videoId"]
+            video_link = f"https://www.youtube.com/watch?v={video_id}"
+            videos.append({"title": title, "link": video_link})
+        return videos
+    except Exception as e:
+        st.error(f"YouTube API error: {e}")
+        return []
+
+def score_videos_with_gpt(videos: List[Dict[str, str]], topic: str) -> str:
+    """
+    Use GPT to score the list of videos and return the best (most relevant) video link.
+    """
+    video_list_str = "\n".join([f"{i+1}. {v['title']} - {v['link']}" for i, v in enumerate(videos)])
+    prompt = f"Here is a list of videos:\n{video_list_str}\n\nFor the topic '{topic}', please return only the link of the video that is most relevant."
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are an expert at evaluating video relevance."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=50,
+            temperature=0.2,
+        )
+        result = response["choices"][0]["message"]["content"].strip()
+        url_match = re.search(r'(https?://[^\s]+)', result)
+        if url_match:
+            return url_match.group(1)
+    except Exception as e:
+        st.error(f"Error scoring videos with GPT: {e}")
+    return ""
+
+def add_best_youtube_videos(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    For each week in the learning plan, extract the week's title (objective),
+    retrieve a set of YouTube videos, use GPT to score them, and then add the best video.
+    """
+    for week in plan.get("weeks", []):
+        topic = week.get("objective", "")
+        if topic:
+            videos = get_youtube_videos(topic, max_results=10)
+            if videos:
+                best_video = score_videos_with_gpt(videos, topic)
+                if best_video:
+                    week["resources"].append({
+                        "name": f"Best Video for {topic}",
+                        "link": best_video,
+                        "type": "video"
+                    })
+    return plan
+
+# -----------------------
+# 5. THEME CSS (STRICT BLACK & WHITE) & CUSTOM WEEK BOX STYLE
 # -----------------------
 def get_theme_css() -> str:
     return """
@@ -144,6 +229,13 @@ def get_theme_css() -> str:
             border-radius: 8px;
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         }
+        .week-box {
+            background-color: #000;
+            color: #fff;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+        }
         h1, h2, h3, h4, h5 {
             color: #ffffff;
         }
@@ -165,18 +257,31 @@ def get_theme_css() -> str:
             margin-right: 5px;
             color: #CBCBCB;
         }
+        .delete-icon {
+            font-family: 'Material Icons';
+            font-size: 24px;
+            color: #CBCBCB;
+            cursor: pointer;
+            background: none;
+            border: none;
+        }
     </style>
     """
 st.markdown(get_theme_css(), unsafe_allow_html=True)
 
 # -----------------------
-# 4. GPT LEARNING PLAN GENERATION
+# 6. GPT LEARNING PLAN GENERATION WITH RAG
 # -----------------------
 def generate_learning_plan(goal: str, timeline: str, learning_style: List[str],
                            background_level: str, weekly_time: int,
                            topics: str, primary_objective: str, future_goals: str,
                            challenges: str, additional_info: str, courses_option: str) -> Dict[str, Any]:
+    # Retrieve additional context for RAG
+    context = retrieve_context_for_goal(goal)
+    
     prompt = f"""
+Context: {context}
+
 You are an advanced learning coach. A user wants to learn about {goal}.
 They are interested in the following topics: {topics}.
 Their primary objective is: {primary_objective}.
@@ -240,6 +345,10 @@ No extra text.
         st.error("Error calling OpenAI API: " + str(e))
         return {}
 
+    # Add best YouTube video for each week.
+    plan_dict = add_best_youtube_videos(plan_dict)
+
+    # Fallback: If a desired resource type is missing, use SerpAPI.
     resource_mapping = {
         "Videos": "video",
         "Articles": "article",
@@ -259,7 +368,7 @@ No extra text.
     return plan_dict
 
 # -----------------------
-# 5. SESSION STATE INITIALIZATION
+# 7. SESSION STATE INITIALIZATION
 # -----------------------
 if "user" not in st.session_state:
     st.session_state["user"] = None
@@ -271,9 +380,13 @@ if "selected_plan" not in st.session_state:
     st.session_state["selected_plan"] = None
 if "loading" not in st.session_state:
     st.session_state["loading"] = False
+if "selected_plan_id" not in st.session_state:
+    st.session_state["selected_plan_id"] = None
+if "submitted_ratings" not in st.session_state:
+    st.session_state["submitted_ratings"] = {}  # Map plan_id -> rating
 
 # -----------------------
-# 6. AUTHENTICATION FUNCTIONS (Using Firebase Auth REST API for demonstration)
+# 8. AUTHENTICATION FUNCTIONS
 # -----------------------
 def sign_up(email: str, password: str, confirm_password: str, phone: str):
     if password != confirm_password:
@@ -286,8 +399,6 @@ def sign_up(email: str, password: str, confirm_password: str, phone: str):
         st.error("Please enter a valid email address.")
         return None
     try:
-        # For demonstration, we store the password in plain text in Firestore.
-        # In production, use Firebase Authentication's secure methods.
         user_data = {
             "email": email,
             "phone": phone,
@@ -325,19 +436,20 @@ def log_in(email: str, password: str):
         st.error(f"Login error: {e}")
 
 # -----------------------
-# 7. REPORT ISSUE FUNCTIONALITY
+# 9. REPORT ISSUE FUNCTIONALITY
 # -----------------------
-def report_issue(description: str):
+def report_issue(plan_id: str, description: str):
     report_data = {
         "email": st.session_state.get("email", "unknown"),
+        "plan_id": plan_id,
         "description": description,
         "timestamp": datetime.datetime.utcnow().isoformat()
     }
     db.collection("reports").add(report_data)
-    st.success("Thank you for reporting the issue!")
+    st.success("Issue reported successfully!")
 
 # -----------------------
-# 8. AUTHENTICATION UI
+# 10. AUTHENTICATION UI
 # -----------------------
 if not st.session_state["user"]:
     st.markdown("<h1><i class='material-icons icon'>school</i> Yello Personalised Learning Plan Generator</h1>", unsafe_allow_html=True)
@@ -356,7 +468,7 @@ if not st.session_state["user"]:
     st.stop()
 
 # -----------------------
-# 9. SIDEBAR (with plan limit check, short titles, and delete icon)
+# 11. SIDEBAR (Plan Management)
 # -----------------------
 st.sidebar.markdown("<h2><i class='material-icons icon'>folder</i> Your Learning Plans</h2>", unsafe_allow_html=True)
 
@@ -385,96 +497,156 @@ for doc in load_saved_plans():
     if len(full_title.split()) > 3:
         short_title += "..."
     plan_id = doc.id
-    col1, col2 = st.sidebar.columns([4,1])
+    col1, col2 = st.sidebar.columns([4, 1])
     with col1:
         if st.button(short_title, key=f"view_{plan_id}"):
-            st.session_state["selected_plan"] = json.loads(plan_data["plan"])
+            st.session_state["selected_plan"] = json.loads(plan_data.get("plan", "{}"))
+            st.session_state["selected_plan_id"] = plan_id
             st.session_state["create_plan"] = False
             rerun()
     with col2:
-        if st.button("🗑", key=f"del_{plan_id}"):
+        # Delete button with trash icon emoji
+        if st.button("🗑️", key=f"del_{plan_id}", help="Delete Plan"):
             learning_plans_ref.document(plan_id).delete()
-            st.rerun()
+            rerun()
             
 st.sidebar.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
 if st.sidebar.button("Logout"):
-    st.session_state["user"] = None
-    st.session_state["email"] = None
-    st.session_state["create_plan"] = False
-    st.session_state["selected_plan"] = None
+    st.session_state.clear()
     rerun()
 
 # -----------------------
-# 10. MAIN CONTENT AREA
+# NEW: WEEK DISPLAY WITH COMBINED ACTION & RESOURCE TEXT, CHECKBOXES, PROGRESS, BLACK BOX BACKGROUND & VIDEO EMBED
+# -----------------------
+def display_week_with_progress(week: Dict[str, Any], week_index: int, weekly_time: int):
+    """
+    Displays each action item + resource as a single sentence with the resource name hyperlinked,
+    along with a checkbox. The entire week is shown within a styled black box that also mentions
+    the estimated time required to complete that week. If a resource of type "video" and a name containing
+    "Best Video for" is found, that video is embedded.
+    """
+    # Unique key for storing checkbox states
+    week_key = f"week_{week_index}_progress"
+    if week_key not in st.session_state:
+        st.session_state[week_key] = {}
+    
+    # Begin the styled black box using custom CSS class "week-box"
+    st.markdown("<div class='week-box'>", unsafe_allow_html=True)
+    st.markdown(f"### Week {week.get('week_number', '?')}: {week.get('objective', 'No Objective')}")
+    st.markdown(f"**Estimated Time: {weekly_time} hrs**")
+    
+    # Pair resources and action items by index
+    resources = week.get("resources", [])
+    actions = week.get("action_items", [])
+    max_len = max(len(resources), len(actions))
+    
+    tasks = []
+    for i in range(max_len):
+        resource = resources[i] if i < len(resources) else None
+        action = actions[i] if i < len(actions) else None
+        
+        if resource and action:
+            resource_name = resource.get("name", "Resource")
+            resource_link = resource.get("link", "#")
+            action_desc = action.get("description", "")
+            due_date = action.get("due_by", "N/A")
+            if resource_name in action_desc:
+                combined_text = action_desc.replace(
+                    resource_name,
+                    f"[{resource_name}]({resource_link})"
+                )
+            else:
+                combined_text = f"{action_desc} [{resource_name}]({resource_link})"
+            combined_text += f" (Due by {due_date})"
+            item_id = f"combined_{week_index}_{i}"
+            tasks.append((item_id, combined_text))
+        elif resource:
+            resource_name = resource.get("name", "Resource")
+            resource_link = resource.get("link", "#")
+            item_id = f"resource_{week_index}_{i}"
+            tasks.append((item_id, f"[{resource_name}]({resource_link})"))
+        elif action:
+            action_desc = action.get("description", "")
+            due_date = action.get("due_by", "N/A")
+            item_id = f"action_{week_index}_{i}"
+            tasks.append((item_id, f"{action_desc} (Due by {due_date})"))
+    
+    st.markdown("#### Checklist")
+    for (item_id, label) in tasks:
+        if item_id not in st.session_state[week_key]:
+            st.session_state[week_key][item_id] = False
+        new_value = st.checkbox(label, value=st.session_state[week_key][item_id], key=f"{week_key}_{item_id}")
+        st.session_state[week_key][item_id] = new_value
+
+    total_items = len(tasks)
+    completed_items = sum(1 for v in st.session_state[week_key].values() if v)
+    completion_pct = (completed_items / total_items * 100) if total_items > 0 else 0
+
+    st.progress(completion_pct / 100.0)
+    st.write(f"{completion_pct:.0f}% Completed")
+    
+    # Embed the best video if available
+    for resource in week.get("resources", []):
+        if resource.get("type", "").lower() == "video" and "Best Video for" in resource.get("name", ""):
+            st.video(resource.get("link"))
+            break  # Embed only one video per week
+    
+    # Close the black box
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# -----------------------
+# 12. MAIN CONTENT AREA (Plan Viewer / Creator)
 # -----------------------
 st.markdown("<h1><i class='material-icons icon'>dashboard</i> Yello Personalised Learning Plan Generator</h1>", unsafe_allow_html=True)
 
+# Reload selected plan from Firestore if a plan is selected
+if st.session_state.get("selected_plan_id"):
+    doc = learning_plans_ref.document(st.session_state["selected_plan_id"]).get()
+    if doc.exists:
+        st.session_state["selected_plan"] = json.loads(doc.to_dict().get("plan", "{}"))
+
 if st.session_state["selected_plan"]:
     plan = st.session_state["selected_plan"]
+    plan_id = st.session_state["selected_plan_id"]
     st.subheader(f"Learning Plan: {plan.get('goal', 'No Title')}")
     st.markdown(f"<p class='small-muted'><strong>Duration:</strong> {plan.get('timeline', 'N/A')}</p>", unsafe_allow_html=True)
     st.markdown(f"<p class='small-muted'><strong>Learning Styles:</strong> {', '.join(plan.get('learning_style', []))}</p>", unsafe_allow_html=True)
     st.markdown(f"<p class='small-muted'><strong>Background Level:</strong> {plan.get('background_level', 'N/A')}</p>", unsafe_allow_html=True)
-    st.markdown(f"<p class='small-muted'><strong>Weekly Time Available:</strong> {plan.get('weekly_time', 'N/A')}</p>", unsafe_allow_html=True)
+    st.markdown(f"<p class='small-muted'><strong>Weekly Time Available:</strong> {plan.get('weekly_time', 'N/A')} hrs</p>", unsafe_allow_html=True)
     
-    for week in plan.get("weeks", []):
-        with st.container():
-            st.markdown(
-                f"""
-                <div class="plan-container">
-                    <h3><i class='material-icons icon'>date_range</i> Week {week.get('week_number', '?')}: {week.get('objective', 'No Objective')}</h3>
-                    <h4><i class='material-icons icon'>link</i> Resources</h4>
-                """,
-                unsafe_allow_html=True,
-            )
-            for resource in week.get("resources", []):
-                resource_name = resource.get("name", "Unknown Resource")
-                link = resource.get("link", "#")
-                resource_type = resource.get("type", "Unknown")
-                st.markdown(f"- [{resource_name}]({link}) ({resource_type})")
-            st.markdown("<h4><i class='material-icons icon'>assignment</i> Action Items</h4>", unsafe_allow_html=True)
-            for action in week.get("action_items", []):
-                if isinstance(action, dict):
-                    st.markdown(f"- **{action.get('description', '')}** (Due by {action.get('due_by', 'N/A')})")
+    # Display each week with the custom styled box. Use the plan's weekly_time for each week.
+    weekly_time = plan.get("weekly_time", 0)
+    for idx, week in enumerate(plan.get("weeks", [])):
+        display_week_with_progress(week, idx, weekly_time)
     
-    st.markdown("<h4>Rate this Learning Plan</h4>", unsafe_allow_html=True)
-    rating = st.slider("Your Rating (1-5)", 1, 5, 3)
-    if st.button("Submit Rating"):
-        plan_id = None
-        for doc in load_saved_plans():
-            data = doc.to_dict()
-            if data.get("title", "") == plan.get("goal", ""):
-                plan_id = doc.id
-                break
-        if plan_id:
+    # Rating Section
+    if plan.get("rating") is None:
+        rating = st.slider("Your Rating (1-5)", 1, 5, 3, key=f"rating_{plan_id}")
+        if st.button("Submit Rating", key=f"submit_rating_{plan_id}"):
             learning_plans_ref.document(plan_id).update({"rating": rating})
+            st.session_state["selected_plan"]["rating"] = rating
             st.success("Thank you for your feedback!")
-    
-    plan_id = None
-    for doc in load_saved_plans():
-        data = doc.to_dict()
-        if data.get("title", "") == plan.get("goal", ""):
-            plan_id = doc.id
-            break
-    if plan_id is None:
-        st.error("Plan ID not found. Cannot report an issue.")
+            rerun()
     else:
-        st.markdown("### Report an Issue")
-        issue_key = f"issue_{plan_id}"
-        issue_text = st.text_area("Describe any issue or feedback you have:", key=issue_key, value="")
-        if st.button("Submit Issue", key=f"submit_issue_{plan_id}"):
-            if issue_text.strip():
-                report_issue(issue_text)  # Updated: pass only the issue description
-                st.success("Issue reported. To submit a new issue, please clear the previous input and enter new one.")
-                if issue_key in st.session_state:
-                    st.session_state.pop(issue_key)
-                rerun()
-            else:
-                st.error("Please provide details about the issue before submitting.")
+        st.write(f"Rating submitted: {plan.get('rating')}/5")
+    
+    # Report Issue Section
+    st.markdown("### Report an Issue")
+    issue_key = f"issue_{plan_id}"
+    issue_text = st.text_area("Describe any issue or feedback you have:", key=issue_key, value="")
+    if st.button("Submit Issue", key=f"submit_issue_{plan_id}"):
+        if issue_text.strip():
+            report_issue(plan_id, issue_text)
+            st.success("Issue reported. To submit a new issue, please clear the previous input and enter new one.")
+            if issue_key in st.session_state:
+                st.session_state.pop(issue_key)
+            rerun()
+        else:
+            st.error("Please provide details about the issue before submitting.")
             
 elif st.session_state["create_plan"]:
     st.markdown("<h2><i class='material-icons icon'>create</i> Create a New Learning Plan</h2>", unsafe_allow_html=True)
-    st.markdown("<p class='small-muted'>Answer the questions below to help us create a tailored learning plan. We will also ask about course preferences (if you select 'Courses') and gather details about your learning style and personality.</p>", unsafe_allow_html=True)
+    st.markdown("<p class='small-muted'>Answer the questions below to help us create a tailored learning plan. We will also ask about course preferences and gather details about your learning style and personality.</p>", unsafe_allow_html=True)
     
     subject = st.text_input("1. What do you want to learn?", placeholder="e.g., Finance")
     topics = st.text_input("2. What specific topics are you interested in?", placeholder="e.g., Investment strategies, valuation, corporate finance")
@@ -489,12 +661,10 @@ elif st.session_state["create_plan"]:
     challenges = st.text_area("9. What challenges or obstacles do you face?", placeholder="e.g., Limited time, difficulty understanding complex topics")
     additional_info = st.text_area("10. Any additional information about your learning style or personality?", placeholder="e.g., Prefer structured blueprints, need hands-on practice")
     
-    courses_option = ""
+    courses_option = "N/A"
     if "Courses" in learning_style:
         courses_option = st.radio("11. Course recommendations: Do you prefer free or paid courses?", ["Free", "Paid", "Both"], index=2)
-    else:
-        courses_option = "N/A"
-
+    
     personality = st.selectbox("12. How would you describe your learning personality?", 
                                  ["Visual Learner", "Auditory Learner", "Kinesthetic Learner", "Read/Write Learner", "Mixed"])
     motivation = st.slider("13. On a scale of 1 to 10, how motivated are you to invest time and resources in your learning journey?", 1, 10, 7)
@@ -527,9 +697,10 @@ elif st.session_state["create_plan"]:
                 )
                 if plan_data and plan_data.get("weeks"):
                     st.session_state["selected_plan"] = plan_data
+                    new_plan_ref = learning_plans_ref.document()
+                    st.session_state["selected_plan_id"] = new_plan_ref.id
                     st.session_state["create_plan"] = False
                     st.session_state["loading"] = False
-                    new_plan_ref = learning_plans_ref.document()
                     new_plan_ref.set({
                         "title": plan_data["goal"],
                         "plan": json.dumps(plan_data),
