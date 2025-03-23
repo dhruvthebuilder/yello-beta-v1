@@ -15,7 +15,7 @@ import os
 st.set_page_config(page_title="Yello - Personalised Learning Plan Generator", layout="wide")
 
 def rerun():
-    st.experimental_rerun()
+    st.rerun()
 
 # Set Pinecone API key in environment.
 os.environ["PINECONE_API_KEY"] = st.secrets["pinecone"]["api_key"]
