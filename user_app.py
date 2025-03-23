@@ -25,7 +25,7 @@ OPENAI_API_KEY = st.secrets["openai"]["api_key"]
 SERPAPI_API_KEY = st.secrets["serpapi"]["api_key"]
 
 # Set the global OpenAI API key.
-openai.api_key = OPENAI_API_KEY
+openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
 # -----------------------
 # 2. FIREBASE INITIALIZATION
@@ -198,7 +198,7 @@ def score_videos_with_gpt(videos: List[Dict[str, str]], topic: str) -> str:
     video_list_str = "\n".join([f"{i+1}. {v['title']} - {v['link']}" for i, v in enumerate(videos)])
     prompt = f"Here is a list of videos:\n{video_list_str}\n\nFor the topic '{topic}', please return only the link of the video that is most relevant."
     try:
-        response = openai.ChatCompletion.create(
+        response = openai_client.chat.completions.create(
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": "You are an expert at evaluating video relevance."},
@@ -417,7 +417,7 @@ Return the response as valid JSON using this exact schema:
 No extra text.
     """
     try:
-        response = openai.ChatCompletion.create(
+        response = openai_client.chat.completions.create(
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": "You create detailed, personalized learning plans with clear weekly outcomes, detailed overviews, and gamified insights."},
