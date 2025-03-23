@@ -15,7 +15,7 @@ import os
 st.set_page_config(page_title="Yello - Personalised Learning Plan Generator", layout="wide")
 
 def rerun():
-    st.rerun()
+    st.experimental_rerun()
 
 # Set Pinecone API key in environment.
 os.environ["PINECONE_API_KEY"] = st.secrets["pinecone"]["api_key"]
@@ -24,8 +24,8 @@ os.environ["PINECONE_API_KEY"] = st.secrets["pinecone"]["api_key"]
 OPENAI_API_KEY = st.secrets["openai"]["api_key"]
 SERPAPI_API_KEY = st.secrets["serpapi"]["api_key"]
 
-# Create a global OpenAI client instance using the new API interface.
-openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+# Set the global OpenAI API key.
+openai.api_key = OPENAI_API_KEY
 
 # -----------------------
 # 2. FIREBASE INITIALIZATION
@@ -42,13 +42,6 @@ if firebase_creds and not firebase_admin._apps:
 
 db = firestore.client()
 
-# (Optional) Load Firebase Web configuration if needed.
-firebase_web_config_str = st.secrets["firebase_web"]["credentials_json"]
-if isinstance(firebase_web_config_str, str):
-    firebase_web_config = json.loads(firebase_web_config_str)
-else:
-    firebase_web_config = firebase_web_config_str
-
 # -----------------------
 # 3. INITIALIZE PINECONE & CURATED CONTENT
 # -----------------------
@@ -64,7 +57,7 @@ index_name = "learning-plan-index"
 if index_name not in pc.list_indexes().names():
     pc.create_index(
         name=index_name,
-        dimension=1536,  # Must match your embedding model's dimension
+        dimension=1536,
         metric="cosine",
         spec=spec
     )
@@ -121,6 +114,7 @@ def extract_json(text: str) -> str:
     return ""
 
 def clean_gpt_response(response_text: str) -> str:
+    """Removes ``` blocks around a GPT response, if present."""
     if response_text.startswith("```"):
         lines = response_text.splitlines()
         if lines[0].strip().startswith("```"):
@@ -204,7 +198,7 @@ def score_videos_with_gpt(videos: List[Dict[str, str]], topic: str) -> str:
     video_list_str = "\n".join([f"{i+1}. {v['title']} - {v['link']}" for i, v in enumerate(videos)])
     prompt = f"Here is a list of videos:\n{video_list_str}\n\nFor the topic '{topic}', please return only the link of the video that is most relevant."
     try:
-        response = openai_client.chat.completions.create(
+        response = openai.ChatCompletion.create(
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": "You are an expert at evaluating video relevance."},
@@ -236,18 +230,7 @@ def add_best_youtube_videos(plan: Dict[str, Any]) -> Dict[str, Any]:
                     })
     return plan
 
-
-def report_issue(plan_id: str, description: str):
-    report_data = {
-        "email": st.session_state.get("email", "unknown"),
-        "plan_id": plan_id,
-        "description": description,
-        "timestamp": datetime.datetime.utcnow().isoformat()
-    }
-    db.collection("reports").add(report_data)
-    st.success("Issue reported successfully!")
-
-# New: Validate resource links; if a link is broken, try to update it.
+# Validate resource links in the plan
 def validate_links_in_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     for week in plan.get("weeks", []):
         for resource in week.get("resources", []):
@@ -258,6 +241,16 @@ def validate_links_in_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
                     if link_is_valid(new_link):
                         resource["link"] = new_link
     return plan
+
+def report_issue(plan_id: str, description: str):
+    report_data = {
+        "email": st.session_state.get("email", "unknown"),
+        "plan_id": plan_id,
+        "description": description,
+        "timestamp": datetime.datetime.utcnow().isoformat()
+    }
+    db.collection("reports").add(report_data)
+    st.success("Issue reported successfully!")
 
 # -----------------------
 # 6. THEME CSS
@@ -285,9 +278,9 @@ def display_week_with_progress(week: Dict[str, Any], week_index: int, weekly_tim
     week_key = f"week_{week_index}_progress"
     plan_id = st.session_state["selected_plan_id"]
     
-    # Get document safely (fallback to empty dict).
     plan_doc = learning_plans_ref.document(plan_id).get().to_dict() or {}
     progress = plan_doc.get("progress", {})
+    
     if week_key in progress:
         st.session_state[week_key] = progress[week_key]
     else:
@@ -349,6 +342,7 @@ def display_week_with_progress(week: Dict[str, Any], week_index: int, weekly_tim
     st.progress(completion_pct / 100.0)
     st.write(f"{completion_pct:.0f}% Completed")
     
+    # If there's a "best video"
     for resource in week.get("resources", []):
         if resource.get("type", "").lower() == "video" and "Best Video for" in resource.get("name", ""):
             st.video(resource.get("link"))
@@ -356,7 +350,6 @@ def display_week_with_progress(week: Dict[str, Any], week_index: int, weekly_tim
     
     st.markdown("</div>", unsafe_allow_html=True)
     
-    # Update Firestore with progress.
     plan_ref = learning_plans_ref.document(plan_id)
     current_doc = plan_ref.get().to_dict() or {}
     progress = current_doc.get("progress", {})
@@ -366,23 +359,23 @@ def display_week_with_progress(week: Dict[str, Any], week_index: int, weekly_tim
 # -----------------------
 # 8. LEARNING PLAN GENERATION WITH RAG (PINECONE RETRIEVAL)
 # -----------------------
-def generate_learning_plan(goal: str, topics: List[str], background_level: str, weekly_time: int, timeline: str) -> Dict[str, Any]:
-    retrieval_query = f"learning plan guidelines for {goal}, topics: {', '.join(topics)}, expertise: {background_level}"
+def generate_learning_plan(goal: str, background_level: str, weekly_time: int, timeline: str, resource_types: List[str]) -> Dict[str, Any]:
+    """Generates a plan with user-chosen resource types."""
+    retrieval_query = f"learning plan guidelines for {goal}, level: {background_level}"
     context_docs = vectorstore.similarity_search(retrieval_query, k=3)
     context_text = "\n\n".join([doc.page_content if hasattr(doc, "page_content") else doc for doc in context_docs])
     extra_context = retrieve_context_for_goal(goal)
     
-    content_pref = st.session_state.get("content_preference", "Outcome-Focused")
+    # Convert resource types to lower-case for the fallback logic
+    resource_types_lower = [r.lower() for r in resource_types]
     
     prompt = f"""
 Context: {context_text}
 Extra Context: {extra_context}
-Content Preference: {content_pref}
+User Resource Preference: {', '.join(resource_types)}
 
 You are an advanced learning coach. A user wants to learn about {goal}.
-They are interested in the following topics: {', '.join(topics)}.
-Their current expertise level is: {background_level}.
-They can dedicate {weekly_time} hours per week, with a timeline of {timeline}.
+They are a(n) {background_level} and can dedicate {weekly_time} hours per week, with a timeline of {timeline}.
 
 For each week, provide:
 - An objective.
@@ -390,7 +383,7 @@ For each week, provide:
 - Detailed outcomes describing what the user will achieve by the end of the week.
 - Gamified insights (e.g., "better than 80% of your peers").
 
-Also, include relevant resources and action items.
+Also, include relevant resources and action items that match the user's preferred resource types: {', '.join(resource_types)}.
 
 Return the response as valid JSON using this exact schema:
 {{
@@ -424,7 +417,7 @@ Return the response as valid JSON using this exact schema:
 No extra text.
     """
     try:
-        response = openai_client.chat.completions.create(
+        response = openai.ChatCompletion.create(
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": "You create detailed, personalized learning plans with clear weekly outcomes, detailed overviews, and gamified insights."},
@@ -448,32 +441,24 @@ No extra text.
         st.error("Error calling OpenAI API: " + str(e))
         return {}
     
-    plan_dict = add_best_youtube_videos(plan_dict)
+    # Add a "best video" for each week if the user wants videos.
+    if "Videos" in resource_types:
+        plan_dict = add_best_youtube_videos(plan_dict)
     
-    desired_types = ["video", "article"]
+    # Check if resource types are present each week, fallback with SerpAPI
     for week in plan_dict.get("weeks", []):
-        for rtype in desired_types:
-            if not any(r.get("type", "").lower() == rtype for r in week.get("resources", [])):
-                query = f"{goal} {week.get('objective', '')} {rtype}"
+        existing_types = [res.get("type", "").lower() for res in week.get("resources", [])]
+        for desired_type in resource_types_lower:
+            if desired_type not in existing_types:
+                # fallback from SerpAPI
+                query = f"{goal} {week.get('objective', '')} {desired_type}"
                 fallback = serpapi_search(query, num_results=1)
                 if fallback:
                     week["resources"].extend(fallback)
-    # Validate resource links before returning.
+    
+    # Validate resource links
     plan_dict = validate_links_in_plan(plan_dict)
     return plan_dict
-
-# New: Validate resource links in the plan.
-def validate_links_in_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
-    for week in plan.get("weeks", []):
-        for resource in week.get("resources", []):
-            if not link_is_valid(resource["link"]):
-                query = f"{resource.get('name', '')} {resource.get('type', '')}"
-                fallback = serpapi_search(query, num_results=1)
-                if fallback and fallback[0].get("link"):
-                    new_link = fallback[0]["link"]
-                    if link_is_valid(new_link):
-                        resource["link"] = new_link
-    return plan
 
 # -----------------------
 # 9. SESSION STATE INITIALIZATION
@@ -560,7 +545,7 @@ if not st.session_state["user"]:
     st.stop()
 
 # -----------------------
-# 11. SIDEBAR (Plan Management & Content Preference)
+# 11. SIDEBAR (Plan Management)
 # -----------------------
 st.sidebar.markdown("<h2><i class='material-icons icon'>folder</i> Your Learning Plans</h2>", unsafe_allow_html=True)
 
@@ -597,7 +582,6 @@ for doc in load_saved_plans():
             st.session_state["create_plan"] = False
             rerun()
     with col2:
-        # Delete button with trash icon emoji
         if st.button("🗑️", key=f"del_{plan_id}", help="Delete Plan"):
             learning_plans_ref.document(plan_id).delete()
             rerun()
@@ -657,12 +641,13 @@ elif st.session_state["create_plan"]:
     st.markdown("<p class='small-muted'>Answer the questions below to generate your personalized plan. You will receive detailed weekly outcomes, a comprehensive overview for each week, and gamified insights on your progress.</p>", unsafe_allow_html=True)
     
     subject = st.text_input("What do you want to learn?", placeholder="e.g., Data Science")
-    topics = st.multiselect("Which topics interest you?", 
-                            ["Finance", "Data Science", "Programming", "Marketing", "Health", "Art"],
-                            default=["Data Science"])
     background_level = st.selectbox("What is your current expertise level?", ["Beginner", "Intermediate", "Advanced"])
     weekly_time = st.slider("How many hours per week can you dedicate?", 1, 40, 5)
     timeline = st.selectbox("What is your timeline?", ["4 weeks", "8 weeks", "12 weeks", "Self-paced"])
+
+    # Let user pick resource types
+    resource_options = ["Videos", "Articles", "Podcasts", "Books", "Courses"]
+    chosen_resources = st.multiselect("Which types of resources do you want in your plan?", resource_options, default=["Videos", "Articles"])
     
     if st.button("Generate Learning Plan"):
         if not subject:
@@ -672,7 +657,7 @@ elif st.session_state["create_plan"]:
             rerun()
     if st.session_state["loading"]:
         with st.spinner("Generating your tailored learning plan..."):
-            plan_data = generate_learning_plan(subject, topics, background_level, weekly_time, timeline)
+            plan_data = generate_learning_plan(subject, background_level, weekly_time, timeline, chosen_resources)
             if plan_data and plan_data.get("weeks"):
                 st.session_state["selected_plan"] = plan_data
                 new_plan_ref = learning_plans_ref.document()
