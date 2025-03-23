@@ -1,4 +1,9 @@
-streamlit==1.43.2
+streamlit>=1.16.0
+firebase-admin>=6.0.0
 openai==0.28.0
-firebase_admin==6.7.0
-requests==2.31.0
+langchain
+langchain-openai
+langchain-pinecone
+pinecone>=0.2.0
+requests
+python-dotenv
