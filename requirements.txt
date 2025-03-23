@@ -7,3 +7,4 @@ langchain-pinecone
 pinecone
 requests
 python-dotenv
+json5
