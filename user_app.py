@@ -204,7 +204,7 @@ def score_videos_with_gpt(videos: List[Dict[str, str]], topic: str) -> str:
                 {"role": "system", "content": "You are an expert at evaluating video relevance."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=50,
+            max_tokens=2000,
             temperature=0.2,
         )
         result = response.choices[0].message.content.strip()
@@ -423,7 +423,7 @@ No extra text.
                 {"role": "system", "content": "You create detailed, personalized learning plans with clear weekly outcomes, detailed overviews, and gamified insights."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=1700,
+            max_tokens=2000,
             temperature=0.2
         )
         plan_text = response.choices[0].message.content
