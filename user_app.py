@@ -1,5 +1,6 @@
 import streamlit as st
 import openai
+import json5
 import json
 import re
 import requests
@@ -8,6 +9,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from typing import Dict, Any, List
 import os
+
 
 # -----------------------
 # 1. CONFIGURATION & INITIAL SETUP
@@ -57,7 +59,7 @@ index_name = "learning-plan-index"
 if index_name not in pc.list_indexes().names():
     pc.create_index(
         name=index_name,
-        dimension=1536,
+        dimension=1536,  # Must match your embedding model's dimension
         metric="cosine",
         spec=spec
     )
@@ -105,24 +107,14 @@ vectorstore = LC_Pinecone.from_existing_index(
 # 5. HELPER FUNCTIONS
 # -----------------------
 def extract_json(text: str) -> str:
-    try:
-        json_match = re.search(r'\{.*\}', text, re.DOTALL)
-        if json_match:
-            return json_match.group(0)
-    except Exception as e:
-        st.error(f"Error extracting JSON: {e}")
+    # Extract the first occurrence of JSON (from the first { to the last })
+    json_match = re.search(r'(\{.*\})', text, re.DOTALL)
+    if json_match:
+        return json_match.group(1).strip()
     return ""
 
 def clean_gpt_response(response_text: str) -> str:
-    """Removes ``` blocks around a GPT response, if present."""
-    if response_text.startswith("```"):
-        lines = response_text.splitlines()
-        if lines[0].strip().startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        response_text = "\n".join(lines)
-    return response_text
+    return response_text.strip()
 
 def link_is_valid(url: str) -> bool:
     try:
@@ -196,7 +188,7 @@ def get_youtube_videos(query: str, max_results: int = 10) -> List[Dict[str, str]
 
 def score_videos_with_gpt(videos: List[Dict[str, str]], topic: str) -> str:
     video_list_str = "\n".join([f"{i+1}. {v['title']} - {v['link']}" for i, v in enumerate(videos)])
-    prompt = f"Here is a list of videos:\n{video_list_str}\n\nFor the topic '{topic}', please return only the link of the video that is most relevant."
+    prompt = f"Return only the link of the most relevant video for the topic '{topic}' from the list:\n{video_list_str}"
     try:
         response = openai_client.chat.completions.create(
             model="gpt-4o",
@@ -204,7 +196,7 @@ def score_videos_with_gpt(videos: List[Dict[str, str]], topic: str) -> str:
                 {"role": "system", "content": "You are an expert at evaluating video relevance."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=2000,
+            max_tokens=50,
             temperature=0.2,
         )
         result = response.choices[0].message.content.strip()
@@ -230,7 +222,6 @@ def add_best_youtube_videos(plan: Dict[str, Any]) -> Dict[str, Any]:
                     })
     return plan
 
-# Validate resource links in the plan
 def validate_links_in_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     for week in plan.get("weeks", []):
         for resource in week.get("resources", []):
@@ -280,7 +271,6 @@ def display_week_with_progress(week: Dict[str, Any], week_index: int, weekly_tim
     
     plan_doc = learning_plans_ref.document(plan_id).get().to_dict() or {}
     progress = plan_doc.get("progress", {})
-    
     if week_key in progress:
         st.session_state[week_key] = progress[week_key]
     else:
@@ -342,7 +332,6 @@ def display_week_with_progress(week: Dict[str, Any], week_index: int, weekly_tim
     st.progress(completion_pct / 100.0)
     st.write(f"{completion_pct:.0f}% Completed")
     
-    # If there's a "best video"
     for resource in week.get("resources", []):
         if resource.get("type", "").lower() == "video" and "Best Video for" in resource.get("name", ""):
             st.video(resource.get("link"))
@@ -360,16 +349,17 @@ def display_week_with_progress(week: Dict[str, Any], week_index: int, weekly_tim
 # 8. LEARNING PLAN GENERATION WITH RAG (PINECONE RETRIEVAL)
 # -----------------------
 def generate_learning_plan(goal: str, background_level: str, weekly_time: int, timeline: str, resource_types: List[str]) -> Dict[str, Any]:
-    """Generates a plan with user-chosen resource types."""
     retrieval_query = f"learning plan guidelines for {goal}, level: {background_level}"
     context_docs = vectorstore.similarity_search(retrieval_query, k=3)
     context_text = "\n\n".join([doc.page_content if hasattr(doc, "page_content") else doc for doc in context_docs])
     extra_context = retrieve_context_for_goal(goal)
     
-    # Convert resource types to lower-case for the fallback logic
     resource_types_lower = [r.lower() for r in resource_types]
     
+    # Revised prompt: instruct GPT to output only a valid JSON object.
     prompt = f"""
+Return ONLY a valid JSON object (with no markdown formatting or extra text) that adheres exactly to the following schema.
+Ensure that all strings are properly escaped.
 Context: {context_text}
 Extra Context: {extra_context}
 User Resource Preference: {', '.join(resource_types)}
@@ -379,43 +369,42 @@ They are a(n) {background_level} and can dedicate {weekly_time} hours per week, 
 
 For each week, provide:
 - An objective.
-- A detailed_overview that comprehensively explains the plan for the week.
+- A detailed_overview that explains the plan for the week.
 - Detailed outcomes describing what the user will achieve by the end of the week.
-- Gamified insights (e.g., "better than 80% of your peers").
+- Gamified insights (for example, "better than 80% of your peers").
 
 Also, include relevant resources and action items that match the user's preferred resource types: {', '.join(resource_types)}.
 
-Return the response as valid JSON using this exact schema:
+The JSON schema is:
 {{
-    "goal": string,
-    "timeline": string,
-    "background_level": string,
-    "weekly_time": number,
-    "weeks": [
+  "goal": string,
+  "timeline": string,
+  "background_level": string,
+  "weekly_time": number,
+  "weeks": [
+    {{
+      "week_number": number,
+      "objective": string,
+      "detailed_overview": string,
+      "outcomes": string,
+      "gamified_insights": string,
+      "resources": [
         {{
-            "week_number": number,
-            "objective": string,
-            "detailed_overview": string,
-            "outcomes": string,
-            "gamified_insights": string,
-            "resources": [
-                {{
-                    "name": string,
-                    "link": string,
-                    "type": string
-                }}
-            ],
-            "action_items": [
-                {{
-                    "description": string,
-                    "due_by": string
-                }}
-            ]
+          "name": string,
+          "link": string,
+          "type": string
         }}
-    ]
+      ],
+      "action_items": [
+        {{
+          "description": string,
+          "due_by": string
+        }}
+      ]
+    }}
+  ]
 }}
-No extra text.
-    """
+"""
     try:
         response = openai_client.chat.completions.create(
             model="gpt-4o",
@@ -423,41 +412,41 @@ No extra text.
                 {"role": "system", "content": "You create detailed, personalized learning plans with clear weekly outcomes, detailed overviews, and gamified insights."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=2000,
+            max_tokens=1700,
             temperature=0.2
         )
-        plan_text = response.choices[0].message.content
-        plan_text = clean_gpt_response(plan_text)
+        raw_response = response.choices[0].message.content
+        st.write("DEBUG: Raw GPT Response:", raw_response)
+        cleaned_response = clean_gpt_response(raw_response)
         try:
-            plan_dict = json.loads(plan_text)
-        except Exception:
-            extracted = extract_json(plan_text)
-            if not extracted:
-                st.error("Failed to extract JSON from GPT response.")
-                st.write("Raw GPT Response:", plan_text)
+            plan_dict = json.loads(cleaned_response)
+        except Exception as e:
+            st.error("JSON parsing error with json.loads: " + str(e))
+            st.write("DEBUG: Response for JSON parsing:", cleaned_response)
+            try:
+                import json5
+                plan_dict = json5.loads(cleaned_response)
+                st.write("DEBUG: Successfully parsed with json5.")
+            except Exception as e2:
+                st.error("JSON parsing also failed with json5: " + str(e2))
                 return {}
-            plan_dict = json.loads(extracted)
     except Exception as e:
         st.error("Error calling OpenAI API: " + str(e))
         return {}
     
-    # Add a "best video" for each week if the user wants videos.
-    if "Videos" in resource_types:
-        plan_dict = add_best_youtube_videos(plan_dict)
+    plan_dict = add_best_youtube_videos(plan_dict)
     
-    # Check if resource types are present each week, fallback with SerpAPI
+    desired_types = [r.lower() for r in resource_types]
     for week in plan_dict.get("weeks", []):
         existing_types = [res.get("type", "").lower() for res in week.get("resources", [])]
-        for desired_type in resource_types_lower:
+        for desired_type in desired_types:
             if desired_type not in existing_types:
-                # fallback from SerpAPI
                 query = f"{goal} {week.get('objective', '')} {desired_type}"
                 fallback = serpapi_search(query, num_results=1)
                 if fallback:
                     week["resources"].extend(fallback)
-    
-    # Validate resource links
     plan_dict = validate_links_in_plan(plan_dict)
+    st.write("DEBUG: Final Learning Plan JSON:", json.dumps(plan_dict, indent=2))
     return plan_dict
 
 # -----------------------
@@ -584,8 +573,8 @@ for doc in load_saved_plans():
     with col2:
         if st.button("🗑️", key=f"del_{plan_id}", help="Delete Plan"):
             learning_plans_ref.document(plan_id).delete()
-            rerun()
-            
+            rerun()   
+         
 st.sidebar.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
 if st.sidebar.button("Logout"):
     st.session_state.clear()
@@ -644,8 +633,8 @@ elif st.session_state["create_plan"]:
     background_level = st.selectbox("What is your current expertise level?", ["Beginner", "Intermediate", "Advanced"])
     weekly_time = st.slider("How many hours per week can you dedicate?", 1, 40, 5)
     timeline = st.selectbox("What is your timeline?", ["4 weeks", "8 weeks", "12 weeks", "Self-paced"])
-
-    # Let user pick resource types
+    
+    # Let user pick resource types.
     resource_options = ["Videos", "Articles", "Podcasts", "Books", "Courses"]
     chosen_resources = st.multiselect("Which types of resources do you want in your plan?", resource_options, default=["Videos", "Articles"])
     
