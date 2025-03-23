@@ -25,7 +25,7 @@ OPENAI_API_KEY = st.secrets["openai"]["api_key"]
 SERPAPI_API_KEY = st.secrets["serpapi"]["api_key"]
 
 # Create a global OpenAI client instance using the new API interface.
-openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 # -----------------------
 # 2. FIREBASE INITIALIZATION
